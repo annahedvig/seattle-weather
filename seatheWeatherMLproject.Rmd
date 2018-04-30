@@ -1,0 +1,403 @@
+---
+title: "seatheWeatherMLproject"
+author: "Russell Romney"
+date: "April 10, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(nnet)
+library(pROC)
+library(class)
+library(e1071)
+library(rpart)
+library(rattle)
+library(randomForest)
+library(caret)
+library(neuralnet)
+library(nnet)
+
+rain=read.csv("seattleWeather_formated.csv")
+```
+
+
+Note: "1"- it rained "0"- didn't rain
+
+## Exploratory Data Analysis
+
+```{r}
+plot(seq(1, length(rain$DATE), 1), rain$PRCP, type="l", ylab="Precipitation (inches)", xlab="Daily values (1948-2017")
+```
+It's hard to tell what is going on
+
+```{r}
+plot(rain$MONTH, rain$PRCP, xlab="Month", ylab="Precipitation (inches)")
+```
+
+Definitely we can see that there ia a monthly pattern - use month as a predictor
+
+```{r}
+plot(rain$YEAR, rain$PRCP)
+```
+
+All years are fairly similar, with few exceptionally rainy days
+
+
+```{r}
+
+year_total=vector()
+year=seq(1948, 2017, 1)
+for (i in 1:length(year)){
+  sub=rain[rain$YEAR==year[i],]
+  year_total[i]=sum(na.omit(sub$PRCP))
+}
+
+plot(year, year_total, type="l", xlab="Year", ylab="Total precipitation (inches/year")
+```
+
+
+```{r}
+# plot of temperature over time
+plot(rain$TMAX_yesterday)
+```
+
+
+```{r}
+# scatter plot of rain vs precipitation
+plot(x=rain$TMAX,y=rain$PRCP)
+```
+
+
+
+
+## 3. Find the best machine learning model
+
+
+```{r}
+
+#---------------------------------------------------------------------------------------------------
+# Format data for ML
+# Create the train and test datasets
+#---------------------------------------------------------------------------------------------------
+rain.ml=data.frame(cbind(rain$RAIN_today, rain$RAIN_yesterday, rain$PRCP_yesterday, rain$TMAX_yesterday, rain$TMIN_yesterday, rain$MONTH))
+colnames(rain.ml)=c("rain_today", "rain_yesterday", "prcp_yesterday", "tmax_yesterday", "tmin_yesterday", "month")
+rain.ml$rain_today=as.factor(rain.ml$rain_today)
+rain.ml$rain_yesterday=as.factor(rain.ml$rain_yesterday)
+rain.ml$month=as.factor(rain.ml$month)
+
+set.seed(1234)
+train.index=sample(c(1:nrow(rain.ml)), 0.6*nrow(rain.ml))
+data.train=rain.ml[train.index,]
+data.test=rain.ml[-train.index,]
+x.test=data.test[,-1]
+y.test=data.test[,1]
+
+```
+
+
+### Logistic Classification
+
+```{r}
+# Run test
+multinom=multinom(rain_today ~.,data=data.train)
+summary(multinom)
+```
+
+```{r}
+#Predict Output
+predicted.multinom= predict(multinom,x.test)
+
+# AUC and ROC
+op.multinom=data.frame(cbind(y.test, predicted.multinom))
+colnames(op.multinom)=c("obs", "pred")
+
+roc.multinom <- multiclass.roc(op.multinom$obs, op.multinom$pred, percent=TRUE)
+auc(roc.multinom)
+
+# Plot the AUC
+plot.roc(roc.multinom[['rocs']][[1]], main=paste0("Logistic regression AUC = ", round(auc(roc.multinom), 2), "%"),lwd=3)
+
+```
+
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+#Calculate and plot the  observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Logistic Regression")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+### Naive Bayes
+```{r}
+nb=naiveBayes(rain_today~.,data=data.train)
+summary(nb)
+```
+
+```{r}
+#Predict Output
+predicted.nb= predict(nb,x.test)
+
+op.nb=data.frame(cbind(y.test, predicted.nb))
+colnames(op.nb)=c("obs", "pred")
+
+roc.nb <- multiclass.roc(op.nb$obs, op.nb$pred, percent=TRUE)
+auc(roc.nb)
+
+plot.roc(roc.nb[['rocs']][[1]], main=paste0("Naive Bayes AUC = ", round(auc(roc.nb), 2), "%"),lwd=3)
+```
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Naive Bayes")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+## Decision Tree
+
+```{r}
+library(rpart)
+# grow tree 
+dt <- rpart(rain_today~.,data=data.train, method="class")
+predicted.dt= predict(dt,x.test, type="vector")
+
+fancyRpartPlot(dt, palettes="Greys")
+# Full-grown tree with 8 splits using 6 different variables 
+# (Not running the line below - do it to see the tree)
+# fancyRpartPlot(rt)
+```
+
+```{r}
+# you can prune thre tree if needed:
+# printcp(dt)
+# Get the optimal CP programmatically...
+# min.xerror <- dt$cptable[which.min(dt$cptable[,"xerror"]),"CP"]
+# min.xerror
+# ...and use it to prune the tree
+# dt.pruned <- prune(dt,cp = min.xerror) 
+# Plot the pruned tree
+# fancyRpartPlot(dt.pruned)
+```
+
+```{r}
+op.dt=data.frame(cbind(y.test, predicted.dt))
+colnames(op.dt)=c("obs", "pred")
+
+roc.dt <- multiclass.roc(op.dt$obs, op.dt$pred, percent=TRUE)
+auc(roc.dt)
+plot.roc(roc.dt[['rocs']][[1]], main=paste0("Decision Tree AUC = ", round(auc(roc.dt), 2), "%"),lwd=3)
+```
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Decision Tree")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+# Random Forest
+
+```{r}
+data.train=na.exclude(data.train)
+
+dt=randomForest(rain_today~.,data=data.train, ntree=1000)
+varImpPlot(dt)
+```
+
+```{r}
+
+#Predict Output
+predicted.dt= predict(dt,x.test)
+
+op.dt=data.frame(cbind(y.test[-1], predicted.dt[-1]))
+colnames(op.dt)=c( "obs", "pred")
+
+roc.dt <- multiclass.roc(op.dt$obs, op.dt$pred, percent=TRUE)
+auc(roc.dt)
+
+plot.roc(roc.dt[['rocs']][[1]], main=paste0("Random Forest AUC = ", round(auc(roc.dt), 2), "%"),lwd=3)
+```
+
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Random Forest")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+# SVM (Support Vector Machine)
+
+```{r}
+svm=svm(rain_today~.,data=data.train, kernel="sigmoid")
+summary(svm)
+```
+
+```{r}
+#Predict Output
+predicted.svm= predict(svm,x.test)
+
+op.svm=data.frame(cbind(y.test, predicted.svm))
+colnames(op.svm)=c("obs", "pred")
+
+roc.svm <- multiclass.roc(op.svm$obs, op.svm$pred, percent=TRUE)
+auc(roc.svm)
+
+plot.roc(roc.svm[['rocs']][[1]], main=paste0("SVM AUC = ", round(auc(roc.svm), 2), "%"),lwd=3)
+```
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="SVM")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+# Gradient Boosting Classifier
+
+```{r}
+# Fitting model
+library(caret)
+library(e1071)
+fitControl <- trainControl( method = "repeatedcv", number = 10, repeats = 10)
+gbm<- train(rain_today~., data =data.train , method = "gbm", trControl = fitControl,verbose = FALSE)
+
+summary(gbm)
+```
+
+```{r}
+#Predict Output
+library(pROC)
+
+predicted.gbm=predict(gbm,x.test,type= "raw")
+
+op.gbm=data.frame(cbind(y.test, predicted.gbm))
+colnames(op.gbm)=c("obs", "pred")
+
+roc.gbm <- multiclass.roc(op.gbm$obs, op.gbm$pred, percent=TRUE)
+auc(roc.gbm)
+
+plot.roc(roc.gbm[['rocs']][[1]], main=paste0("Gradient Boosting AUC = ", round(auc(roc.gbm), 2), "%"),lwd=3)
+
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Gradient Boosting")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
+
+# Neural Networks
+
+```{r}
+library(neuralnet)
+library(nnet)
+
+
+n <- names(data.train)
+f <- as.formula(paste("rain_today~", paste(n[!n %in% "rain_today"], collapse = " + ")))
+nn <- nnet(f,data=data.train, size = 15)
+
+#Predict Output
+predicted.nn = predict(nn,x.test, type="class")
+
+op.nn=data.frame(cbind(y.test, as.numeric(predicted.nn)))
+colnames(op.nn)=c("obs", "pred")
+
+
+
+roc.nn <- multiclass.roc(op.nn$obs, op.nn$pred, percent=TRUE)
+auc(roc.nn)
+
+plot.roc(roc.nn[['rocs']][[1]], main=paste0("Neural Networks AUC = ", round(auc(roc.nn), 2), "%"),lwd=3)
+```
+
+
+```{r}
+op.multinom.summary=matrix(NA, ncol=2,nrow=2)
+colnames(op.multinom.summary)=c("1-rain", "2-no rain")
+
+
+# Observed vs predicted
+for (i in 1:2){
+  sub.obs=op.multinom[op.multinom$obs==i,]
+  for (j in 1:2){
+    op.multinom.summary[j,i]=nrow(sub.obs[sub.obs$pred==j,])
+  }
+}
+
+grays=c(gray(0.1), gray(0.7))
+barplot(op.multinom.summary, col=grays, ylim=c(0,7000), xlab="Rain", ylab="Observed", main="Neural Networks")
+legend("topright", title="Predicted", c( "1-rain", "2-no rain"), col=grays, lty=1, lwd=3, box.lty=0)
+```
+
